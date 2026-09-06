@@ -578,6 +578,34 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
             console.warn(`[LOGIN] WinGo page still loading; checking captured token: ${navigationError.message}`);
         }
         await sleep(3000);
+
+        const displayedBalance = await page.evaluate(() => {
+            const amountPattern = /(?:₹|Rs\.?|INR)\s*([\d,]+(?:\.\d+)?)/i;
+            const labels = [...document.querySelectorAll('*')]
+                .filter(element => element.children.length === 0 && /wallet\s*balance/i.test(element.textContent || ''));
+
+            for (const label of labels) {
+                let parent = label;
+                for (let depth = 0; depth < 4 && parent; depth++, parent = parent.parentElement) {
+                    const match = (parent.innerText || '').match(amountPattern);
+                    if (match) return Number(match[1].replace(/,/g, ''));
+                }
+            }
+
+            const match = (document.body.innerText || '').match(amountPattern);
+            return match ? Number(match[1].replace(/,/g, '')) : null;
+        }).catch(() => null);
+
+        if (Number.isFinite(displayedBalance)) {
+            balanceFallbacks[String(userId)] = { balance: displayedBalance, capturedAt: Date.now() };
+            console.log(`[BALANCE FALLBACK] Wallet page balance captured for user ${userId}: ${displayedBalance}`);
+        }
+
+        const cookies = await page.cookies().catch(() => []);
+        userSessions[String(userId)] = {
+            cookieHeader: cookies.map(cookie => `${cookie.name}=${cookie.value}`).join('; '),
+            capturedAt: Date.now()
+        };
         
         // Wait specifically for the authenticated GetBalance request if not captured yet.
         if (!capturedToken) {
@@ -760,6 +788,7 @@ function clearUserToken(userId) {
     const key = String(userId);
     delete userTokens[key];
     delete userSessions[key];
+    delete balanceFallbacks[key];
     if (userCreds[key]) delete userCreds[key].token;
     return true;
 }
@@ -773,6 +802,7 @@ function isTokenExpiredMessage(message) {
 
 let userTokens = {}; // Runtime-only token cache; deliberately not persisted to a file.
 let userSessions = {}; // Runtime-only cookies/device metadata for authenticated API calls.
+let balanceFallbacks = {}; // Short-lived wallet values read from the authenticated page.
 let userLastSeen = {};
 const nextRunTimers = new Map();
 const resultCheckTimers = new Map();
@@ -986,6 +1016,15 @@ async function getLiveBalance(userId, chatId = null) {
         const responseMessage = responseData?.msg || responseData?.message || responseData?.error;
         const errMsg = responseMessage || (e.response?.status ? `HTTP ${e.response.status}` : e.message) || "API Error";
         console.error(`[BALANCE ERROR] status=${e.response?.status || "none"} response=${JSON.stringify(responseData || {})}`);
+
+        const fallback = balanceFallbacks[String(userId)];
+        const fallbackAge = fallback ? Date.now() - fallback.capturedAt : Infinity;
+        if (e.response?.status === 403 && Number.isFinite(fallback?.balance) && fallbackAge < 10 * 60 * 1000) {
+            console.warn(`[BALANCE FALLBACK] Using wallet page value for user ${userId}; age=${Math.round(fallbackAge / 1000)}s`);
+            if (!profitTrack[userId]) profitTrack[userId] = { totalBets:0, wins:0, losses:0, pnl:0, winStreak:0, lossStreak:0, maxW:0, maxL:0, totalBetAmount: 0 };
+            profitTrack[userId].walletBalance = fallback.balance;
+            return { success: true, balance: fallback.balance, source: "wallet-page" };
+        }
         return { success: false, message: errMsg };
     }
 }
