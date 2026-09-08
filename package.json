@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "type": "commonjs",
-  "main": "bot (1) (2).js",
+  "main": "bot.js",
   "scripts": {
-    "start": "node \"bot (1) (2).js\""
+    "start": "node bot.js"
   },
   "dependencies": {
     "axios": "^1.18.1",
