@@ -1012,6 +1012,46 @@ async function parseBalanceResponse(r) {
     };
 }
 
+async function getBrowserBalance(url, token, session = {}) {
+    let browser;
+    try {
+        browser = await puppeteer.launch({
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage']
+        });
+        const page = await browser.newPage();
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        const cookies = String(session.cookieHeader || '').split(';').map(item => item.trim()).filter(Boolean).map(item => {
+            const separator = item.indexOf('=');
+            return separator > 0 ? { name: item.slice(0, separator), value: item.slice(separator + 1), domain: '.ts777.co', path: '/' } : null;
+        }).filter(Boolean);
+        if (cookies.length) await page.setCookie(...cookies);
+        await page.goto(SITE_URL, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+        const result = await page.evaluate(async ({ apiUrl, authToken, siteUrl }) => {
+            const response = await fetch(apiUrl, {
+                method: 'GET',
+                headers: {
+                    Authorization: 'Bearer ' + authToken,
+                    Accept: 'application/json, text/plain, */*',
+                    Origin: siteUrl,
+                    Referer: siteUrl + '/'
+                },
+                credentials: 'include'
+            });
+            const text = await response.text();
+            let data = null;
+            try { data = JSON.parse(text); } catch (_) {}
+            return { status: response.status, data };
+        }, { apiUrl: url, authToken: normalizeToken(token), siteUrl: SITE_URL });
+        if (result?.data) return parseBalanceResponse({ data: result.data });
+        return { success: false, message: `Browser balance request returned HTTP ${result?.status || 'unknown'}` };
+    } catch (error) {
+        return { success: false, message: error.message || 'Browser balance request failed' };
+    } finally {
+        if (browser) await browser.close().catch(() => {});
+    }
+}
+
 async function getLiveBalance(userId, chatId = null) {
     let token = getToken(userId);
     
@@ -1061,6 +1101,17 @@ async function getLiveBalance(userId, chatId = null) {
         const responseMessage = responseData?.msg || responseData?.message || responseData?.error;
         const errMsg = responseMessage || (e.response?.status ? `HTTP ${e.response.status}` : e.message) || "API Error";
         console.error(`[BALANCE ERROR] status=${e.response?.status || "none"} response=${JSON.stringify(responseData || {})}`);
+
+        if (e.response?.status === 403) {
+            const browserResult = await getBrowserBalance(url, token, session);
+            if (browserResult.success) {
+                if (!profitTrack[userId]) profitTrack[userId] = { totalBets:0, wins:0, losses:0, pnl:0, winStreak:0, lossStreak:0, maxW:0, maxL:0, totalBetAmount: 0 };
+                profitTrack[userId].walletBalance = Number(browserResult.balance) || 0;
+                console.log(`[BALANCE BROWSER FALLBACK] Balance fetched for user ${userId}`);
+                return { ...browserResult, source: "browser" };
+            }
+            console.warn(`[BALANCE BROWSER FALLBACK] ${browserResult.message}`);
+        }
 
         const fallback = balanceFallbacks[String(userId)];
         const fallbackAge = fallback ? Date.now() - fallback.capturedAt : Infinity;
